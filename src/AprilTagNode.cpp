@@ -13,6 +13,7 @@
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <tf2_ros/transform_broadcaster.h>
+#include <std_srvs/srv/empty.hpp>
 
 // apriltag
 #include "tag_functions.hpp"
@@ -124,6 +125,20 @@ private:
     void onCamera(const sensor_msgs::msg::Image::ConstSharedPtr& msg_img, const sensor_msgs::msg::CameraInfo::ConstSharedPtr& msg_ci);
 
     rcl_interfaces::msg::SetParametersResult onParameter(const std::vector<rclcpp::Parameter>& parameters);
+
+    rclcpp::Service<std_srvs::srv::Empty>::SharedPtr start_srv_;
+    rclcpp::Service<std_srvs::srv::Empty>::SharedPtr stop_srv_;
+
+    bool scanning = false;
+
+    void start_scanning(
+        const std::shared_ptr<rmw_request_id_t> request_header,
+        const std::shared_ptr<std_srvs::srv::Empty::Request> request,
+        std::shared_ptr<std_srvs::srv::Empty::Response> response);
+    void stop_scanning(
+        const std::shared_ptr<rmw_request_id_t> request_header,
+        const std::shared_ptr<std_srvs::srv::Empty::Request> request,
+        std::shared_ptr<std_srvs::srv::Empty::Response> response);
 };
 
 RCLCPP_COMPONENTS_REGISTER_NODE(AprilTagNode)
@@ -139,6 +154,13 @@ AprilTagNode::AprilTagNode(const rclcpp::NodeOptions& options)
     pub_detections(create_publisher<apriltag_msgs::msg::AprilTagDetectionArray>("detections", rclcpp::QoS(1))),
     tf_broadcaster(this)
 {
+    start_srv_ = this->create_service<std_srvs::srv::Empty>(
+    (std::string)this->get_name() + (const char*)"_start_scanning",
+    std::bind(&AprilTagNode::start_scanning, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+    stop_srv_ = this->create_service<std_srvs::srv::Empty>(
+    (std::string)this->get_name() + (const char*)"_stop_scanning",
+    std::bind(&AprilTagNode::stop_scanning, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+
     // read-only parameters
     const std::string tag_family = declare_parameter("family", "36h11", descr("tag family", true));
     tag_edge_size = declare_parameter("size", 1.0, descr("default tag size", true));
@@ -193,68 +215,71 @@ AprilTagNode::~AprilTagNode()
 void AprilTagNode::onCamera(const sensor_msgs::msg::Image::ConstSharedPtr& msg_img,
                             const sensor_msgs::msg::CameraInfo::ConstSharedPtr& msg_ci)
 {
-    // precompute inverse projection matrix
-    const Mat3 Pinv = Eigen::Map<const Eigen::Matrix<double, 3, 4, Eigen::RowMajor>>(msg_ci->p.data()).leftCols<3>().inverse();
+    if(scanning)
+    {
+        // precompute inverse projection matrix
+        const Mat3 Pinv = Eigen::Map<const Eigen::Matrix<double, 3, 4, Eigen::RowMajor>>(msg_ci->p.data()).leftCols<3>().inverse();
 
-    // convert to 8bit monochrome image
-    const cv::Mat img_uint8 = cv_bridge::toCvShare(msg_img, "mono8")->image;
+        // convert to 8bit monochrome image
+        const cv::Mat img_uint8 = cv_bridge::toCvShare(msg_img, "mono8")->image;
 
-    image_u8_t im{img_uint8.cols, img_uint8.rows, img_uint8.cols, img_uint8.data};
+        image_u8_t im{img_uint8.cols, img_uint8.rows, img_uint8.cols, img_uint8.data};
 
-    // detect tags
-    mutex.lock();
-    zarray_t* detections = apriltag_detector_detect(td, &im);
-    mutex.unlock();
+        // detect tags
+        mutex.lock();
+        zarray_t* detections = apriltag_detector_detect(td, &im);
+        mutex.unlock();
 
-    if(profile)
-        timeprofile_display(td->tp);
+        if(profile)
+            timeprofile_display(td->tp);
 
-    apriltag_msgs::msg::AprilTagDetectionArray msg_detections;
-    msg_detections.header = msg_img->header;
+        apriltag_msgs::msg::AprilTagDetectionArray msg_detections;
+        msg_detections.header = msg_img->header;
 
-    std::vector<geometry_msgs::msg::TransformStamped> tfs;
+        std::vector<geometry_msgs::msg::TransformStamped> tfs;
 
-    for(int i = 0; i < zarray_size(detections); i++) {
-        apriltag_detection_t* det;
-        zarray_get(detections, i, &det);
+        for(int i = 0; i < zarray_size(detections); i++) {
+            apriltag_detection_t* det;
+            zarray_get(detections, i, &det);
 
-        RCLCPP_DEBUG(get_logger(),
-                     "detection %3d: id (%2dx%2d)-%-4d, hamming %d, margin %8.3f\n",
-                     i, det->family->nbits, det->family->h, det->id,
-                     det->hamming, det->decision_margin);
+            RCLCPP_DEBUG(get_logger(),
+                         "detection %3d: id (%2dx%2d)-%-4d, hamming %d, margin %8.3f\n",
+                         i, det->family->nbits, det->family->h, det->id,
+                         det->hamming, det->decision_margin);
 
-        // ignore untracked tags
-        if(!tag_frames.empty() && !tag_frames.count(det->id)) { continue; }
+            // ignore untracked tags
+            if(!tag_frames.empty() && !tag_frames.count(det->id)) { continue; }
 
-        // reject detections with more corrected bits than allowed
-        if(det->hamming > max_hamming) { continue; }
+            // reject detections with more corrected bits than allowed
+            if(det->hamming > max_hamming) { continue; }
 
-        // detection
-        apriltag_msgs::msg::AprilTagDetection msg_detection;
-        msg_detection.family = std::string(det->family->name);
-        msg_detection.id = det->id;
-        msg_detection.hamming = det->hamming;
-        msg_detection.decision_margin = det->decision_margin;
-        msg_detection.centre.x = det->c[0];
-        msg_detection.centre.y = det->c[1];
-        std::memcpy(msg_detection.corners.data(), det->p, sizeof(double) * 8);
-        std::memcpy(msg_detection.homography.data(), det->H->data, sizeof(double) * 9);
-        msg_detections.detections.push_back(msg_detection);
+            // detection
+            apriltag_msgs::msg::AprilTagDetection msg_detection;
+            msg_detection.family = std::string(det->family->name);
+            msg_detection.id = det->id;
+            msg_detection.hamming = det->hamming;
+            msg_detection.decision_margin = det->decision_margin;
+            msg_detection.centre.x = det->c[0];
+            msg_detection.centre.y = det->c[1];
+            std::memcpy(msg_detection.corners.data(), det->p, sizeof(double) * 8);
+            std::memcpy(msg_detection.homography.data(), det->H->data, sizeof(double) * 9);
+            msg_detections.detections.push_back(msg_detection);
 
-        // 3D orientation and position
-        geometry_msgs::msg::TransformStamped tf;
-        tf.header = msg_img->header;
-        // set child frame name by generic tag name or configured tag name
-        tf.child_frame_id = tag_frames.count(det->id) ? tag_frames.at(det->id) : std::string(det->family->name) + ":" + std::to_string(det->id);
-        getPose(*(det->H), Pinv, tf.transform, tag_sizes.count(det->id) ? tag_sizes.at(det->id) : tag_edge_size);
+            // 3D orientation and position
+            geometry_msgs::msg::TransformStamped tf;
+            tf.header = msg_img->header;
+            // set child frame name by generic tag name or configured tag name
+            tf.child_frame_id = tag_frames.count(det->id) ? tag_frames.at(det->id) : std::string(det->family->name) + ":" + std::to_string(det->id);
+            getPose(*(det->H), Pinv, tf.transform, tag_sizes.count(det->id) ? tag_sizes.at(det->id) : tag_edge_size);
 
-        tfs.push_back(tf);
-    }
+                tfs.push_back(tf);
+            }
 
-    pub_detections->publish(msg_detections);
-    tf_broadcaster.sendTransform(tfs);
+        pub_detections->publish(msg_detections);
+        tf_broadcaster.sendTransform(tfs);
 
-    apriltag_detections_destroy(detections);
+        apriltag_detections_destroy(detections);
+        }
 }
 
 rcl_interfaces::msg::SetParametersResult
@@ -282,4 +307,31 @@ AprilTagNode::onParameter(const std::vector<rclcpp::Parameter>& parameters)
     result.successful = true;
 
     return result;
+}
+
+void AprilTagNode::start_scanning(
+    const std::shared_ptr<rmw_request_id_t> request_header,
+    const std::shared_ptr<std_srvs::srv::Empty::Request> request,
+    std::shared_ptr<std_srvs::srv::Empty::Response> response
+)
+{
+    (void)request_header;
+    (void)request;
+    (void)response;
+
+    scanning = true;
+}
+
+void AprilTagNode::stop_scanning(
+    const std::shared_ptr<rmw_request_id_t> request_header,
+    const std::shared_ptr<std_srvs::srv::Empty::Request> request,
+    std::shared_ptr<std_srvs::srv::Empty::Response> response
+)
+{
+    (void)request_header;
+    (void)request;
+    (void)response;
+    
+    scanning = false;
+
 }
