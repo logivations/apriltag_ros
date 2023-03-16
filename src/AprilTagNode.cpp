@@ -227,6 +227,7 @@ void AprilTagNode::onCamera(const sensor_msgs::msg::Image::ConstSharedPtr& msg_i
     msg_detections.header = msg_img->header;
 
     std::vector<geometry_msgs::msg::TransformStamped> tfs;
+    std::map<std::string, int> child_frame_ids;
 
     for(int i = 0; i < zarray_size(detections); i++) {
         apriltag_detection_t* det;
@@ -259,7 +260,9 @@ void AprilTagNode::onCamera(const sensor_msgs::msg::Image::ConstSharedPtr& msg_i
         geometry_msgs::msg::TransformStamped tf;
         tf.header = msg_img->header;
         // set child frame name by generic tag name or configured tag name
-        tf.child_frame_id = tag_frames.count(det->id) ? tag_frames.at(det->id) : std::string(det->family->name) + ":" + std::to_string(det->id);
+        std::string new_child_frame_id = tag_frames.count(det->id) ? tag_frames.at(det->id) : std::string(det->family->name) + ":" + std::to_string(det->id);
+        child_frame_ids[new_child_frame_id]++;
+        tf.child_frame_id = child_frame_ids[new_child_frame_id] == 1 ? new_child_frame_id : new_child_frame_id + "_" +std::to_string(child_frame_ids[new_child_frame_id]);
         getPose(*(det->H), Pinv, tf.transform, tag_sizes.count(det->id) ? tag_sizes.at(det->id) : tag_edge_size);
 
         tfs.push_back(tf);
