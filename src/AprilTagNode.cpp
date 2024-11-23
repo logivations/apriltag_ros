@@ -128,7 +128,7 @@ private:
 
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr toggle_enabled_srv;
 
-    bool scanning = true;
+    bool scanning = false;
 
     void toggle_enabled(
         const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
