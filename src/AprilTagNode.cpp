@@ -169,6 +169,7 @@ AprilTagNode::AprilTagNode(const rclcpp::NodeOptions& options)
 
     declare_parameter("max_hamming", 0, descr("reject detections with more corrected bits than allowed"));
     declare_parameter("profile", false, descr("print profiling information to stdout"));
+    declare_parameter("scanning", false, descr("start scanning"));
 
     if(!frames.empty()) {
         if(ids.size() != frames.size()) {
@@ -292,6 +293,7 @@ AprilTagNode::onParameter(const std::vector<rclcpp::Parameter>& parameters)
         IF("detector.debug", td->debug)
         IF("max_hamming", max_hamming)
         IF("profile", profile)
+        IF("scanning", scanning)
     }
 
     mutex.unlock();
