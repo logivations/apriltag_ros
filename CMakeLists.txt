@@ -109,6 +109,7 @@ ament_target_dependencies(AprilTagNode
     sensor_msgs
     apriltag_msgs
     tf2_ros
+    std_srvs
     image_transport
     cv_bridge
 )

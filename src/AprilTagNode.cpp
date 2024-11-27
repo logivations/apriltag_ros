@@ -1,5 +1,6 @@
 // ros
 #include "pose_estimation.hpp"
+#include <optional>
 #include <apriltag_msgs/msg/april_tag_detection.hpp>
 #include <apriltag_msgs/msg/april_tag_detection_array.hpp>
 #ifdef cv_bridge_HPP
@@ -79,13 +80,16 @@ private:
 
     std::function<void(apriltag_family_t*)> tf_destructor;
 
-    const image_transport::CameraSubscriber sub_cam;
+    rclcpp::Subscription<sensor_msgs::msg::Image>::ConstSharedPtr image_sub;
+    rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::ConstSharedPtr cam_info_subscriber;
     const rclcpp::Publisher<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr pub_detections;
     tf2_ros::TransformBroadcaster tf_broadcaster;
 
     pose_estimation_f estimate_pose = nullptr;
+    std::optional<sensor_msgs::msg::CameraInfo> camera_info;
 
-    void onCamera(const sensor_msgs::msg::Image::ConstSharedPtr& msg_img, const sensor_msgs::msg::CameraInfo::ConstSharedPtr& msg_ci);
+    void onImage(const sensor_msgs::msg::Image::ConstSharedPtr& msg_img);
+    void onCameraInfo(const sensor_msgs::msg::CameraInfo::ConstSharedPtr& msg_ci);
 
     rcl_interfaces::msg::SetParametersResult onParameter(const std::vector<rclcpp::Parameter>& parameters);
 
@@ -107,12 +111,12 @@ AprilTagNode::AprilTagNode(const rclcpp::NodeOptions& options)
     cb_parameter(add_on_set_parameters_callback(std::bind(&AprilTagNode::onParameter, this, std::placeholders::_1))),
     td(apriltag_detector_create()),
     // topics
-    sub_cam(image_transport::create_camera_subscription(
-        this,
-        this->get_node_topics_interface()->resolve_topic_name("image_rect"),
-        std::bind(&AprilTagNode::onCamera, this, std::placeholders::_1, std::placeholders::_2),
-        declare_parameter("image_transport", "raw", descr({}, true)),
-        rmw_qos_profile_sensor_data)),
+    image_sub(create_subscription<sensor_msgs::msg::Image>(
+      this->get_node_topics_interface()->resolve_topic_name("image_rect"), rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort(),
+      std::bind(&AprilTagNode::onImage, this, std::placeholders::_1))),
+    cam_info_subscriber(create_subscription<sensor_msgs::msg::CameraInfo>(
+      this->get_node_topics_interface()->resolve_topic_name("camera_info"), rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort(),
+      std::bind(&AprilTagNode::onCameraInfo, this, std::placeholders::_1))),
     pub_detections(create_publisher<apriltag_msgs::msg::AprilTagDetectionArray>("detections", rclcpp::QoS(1))),
     tf_broadcaster(this)
 {
@@ -172,14 +176,22 @@ AprilTagNode::~AprilTagNode()
     tf_destructor(tf);
 }
 
-void AprilTagNode::onCamera(const sensor_msgs::msg::Image::ConstSharedPtr& msg_img,
-                            const sensor_msgs::msg::CameraInfo::ConstSharedPtr& msg_ci)
+void AprilTagNode::onCameraInfo(const sensor_msgs::msg::CameraInfo::ConstSharedPtr& msg_ci)
+{
+    camera_info = *msg_ci;
+  }
+void AprilTagNode::onImage(const sensor_msgs::msg::Image::ConstSharedPtr& msg_img)
 {
     if(!scanning){
         return;
     }
+    if (!camera_info.has_value()) {
+        RCLCPP_WARN(get_logger(), "No camera info available yet");
+        return;
+    }
+    const sensor_msgs::msg::CameraInfo& ci = camera_info.value();
     // camera intrinsics for rectified images
-    const std::array<double, 4> intrinsics = {msg_ci->p.data()[0], msg_ci->p.data()[5], msg_ci->p.data()[2], msg_ci->p.data()[6]};
+    const std::array<double, 4> intrinsics = {ci.p.data()[0], ci.p.data()[5], ci.p.data()[2], ci.p.data()[6]};
 
     // convert to 8bit monochrome image
     const cv::Mat img_uint8 = cv_bridge::toCvShare(msg_img, "mono8")->image;
