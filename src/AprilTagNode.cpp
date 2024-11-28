@@ -75,6 +75,7 @@ private:
     double tag_edge_size;
     std::atomic<int> max_hamming;
     std::atomic<bool> profile;
+    std::atomic<bool> publish_tf;
     std::unordered_map<int, std::string> tag_frames;
     std::unordered_map<int, double> tag_sizes;
 
@@ -144,6 +145,7 @@ AprilTagNode::AprilTagNode(const rclcpp::NodeOptions& options)
 
     declare_parameter("max_hamming", 0, descr("reject detections with more corrected bits than allowed"));
     declare_parameter("profile", false, descr("print profiling information to stdout"));
+    declare_parameter("publish_tf", false, descr("estimate pose and publish tf"));
 
     if(!frames.empty()) {
         if(ids.size() != frames.size()) {
@@ -238,6 +240,9 @@ void AprilTagNode::onImage(const sensor_msgs::msg::Image::ConstSharedPtr& msg_im
         std::memcpy(msg_detection.homography.data(), det->H->data, sizeof(double) * 9);
         msg_detections.detections.push_back(msg_detection);
 
+        if(!publish_tf){
+            continue;
+        }
         // 3D orientation and position
         geometry_msgs::msg::TransformStamped tf;
         tf.header = msg_img->header;
@@ -252,7 +257,9 @@ void AprilTagNode::onImage(const sensor_msgs::msg::Image::ConstSharedPtr& msg_im
     }
 
     pub_detections->publish(msg_detections);
-    tf_broadcaster.sendTransform(tfs);
+    if(publish_tf){
+        tf_broadcaster.sendTransform(tfs);
+    }
 
     apriltag_detections_destroy(detections);
 }
@@ -275,6 +282,7 @@ AprilTagNode::onParameter(const std::vector<rclcpp::Parameter>& parameters)
         IF("detector.debug", td->debug)
         IF("max_hamming", max_hamming)
         IF("profile", profile)
+        IF("publish_tf", publish_tf)
     }
 
     mutex.unlock();
