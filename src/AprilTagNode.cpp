@@ -113,7 +113,7 @@ AprilTagNode::AprilTagNode(const rclcpp::NodeOptions& options)
     td(apriltag_detector_create()),
     // topics
     image_sub(create_subscription<sensor_msgs::msg::Image>(
-      this->get_node_topics_interface()->resolve_topic_name("image_rect"), rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort(),
+      this->get_node_topics_interface()->resolve_topic_name("image_rect"), rclcpp::SystemDefaultsQoS(),
       std::bind(&AprilTagNode::onImage, this, std::placeholders::_1))),
     cam_info_subscriber(create_subscription<sensor_msgs::msg::CameraInfo>(
       this->get_node_topics_interface()->resolve_topic_name("camera_info"), rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort(),
@@ -191,6 +191,8 @@ void AprilTagNode::onImage(const sensor_msgs::msg::Image::ConstSharedPtr& msg_im
         RCLCPP_WARN(get_logger(), "No camera info available yet");
         return;
     }
+
+    RCLCPP_INFO(get_logger(), "Received an image");
     const sensor_msgs::msg::CameraInfo& ci = camera_info.value();
     // camera intrinsics for rectified images
     const std::array<double, 4> intrinsics = {ci.p.data()[0], ci.p.data()[5], ci.p.data()[2], ci.p.data()[6]};
