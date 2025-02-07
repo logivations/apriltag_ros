@@ -94,6 +94,8 @@ private:
 
     rcl_interfaces::msg::SetParametersResult onParameter(const std::vector<rclcpp::Parameter>& parameters);
 
+    rclcpp::QoS getQoS();
+
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr toggle_enabled_srv;
 
     bool scanning = false;
@@ -113,7 +115,7 @@ AprilTagNode::AprilTagNode(const rclcpp::NodeOptions& options)
     td(apriltag_detector_create()),
     // topics
     image_sub(create_subscription<sensor_msgs::msg::Image>(
-      this->get_node_topics_interface()->resolve_topic_name("image_rect"), rclcpp::SystemDefaultsQoS(),
+      this->get_node_topics_interface()->resolve_topic_name("image_rect"), getQoS(),
       std::bind(&AprilTagNode::onImage, this, std::placeholders::_1))),
     cam_info_subscriber(create_subscription<sensor_msgs::msg::CameraInfo>(
       this->get_node_topics_interface()->resolve_topic_name("camera_info"), rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort(),
@@ -305,4 +307,17 @@ void AprilTagNode::toggle_enabled(
     }
     scanning = request->data;
     response->success = true;
+}
+
+rclcpp::QoS AprilTagNode::getQoS()
+{
+    bool qos_param = this->declare_parameter<bool>("use_system_default_qos", false);
+
+    if (qos_param) {
+        RCLCPP_INFO(get_logger(), "Using SystemDefaultsQoS (simulation mode).");
+        return rclcpp::SystemDefaultsQoS(); 
+    } else {
+        RCLCPP_INFO(get_logger(), "Using KeepLast QoS (robot mode).");
+        return rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort();
+    }
 }
