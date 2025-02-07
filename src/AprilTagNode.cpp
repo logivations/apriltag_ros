@@ -192,7 +192,6 @@ void AprilTagNode::onImage(const sensor_msgs::msg::Image::ConstSharedPtr& msg_im
         return;
     }
 
-    RCLCPP_INFO(get_logger(), "Received an image");
     const sensor_msgs::msg::CameraInfo& ci = camera_info.value();
     // camera intrinsics for rectified images
     const std::array<double, 4> intrinsics = {ci.p.data()[0], ci.p.data()[5], ci.p.data()[2], ci.p.data()[6]};
