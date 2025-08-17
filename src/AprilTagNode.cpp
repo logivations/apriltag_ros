@@ -72,7 +72,7 @@ private:
 
     // parameter
     std::mutex mutex;
-    double tag_edge_size;
+    std::atomic<double> tag_edge_size;
     std::atomic<int> max_hamming;
     std::atomic<bool> profile;
     std::atomic<bool> publish_tf;
@@ -127,7 +127,7 @@ AprilTagNode::AprilTagNode(const rclcpp::NodeOptions& options)
 
     // read-only parameters
     const std::string tag_family = declare_parameter("family", "36h11", descr("tag family", true));
-    tag_edge_size = declare_parameter("size", 1.0, descr("default tag size", true));
+    tag_edge_size = declare_parameter("size", 1.0, descr("default tag size"));
 
     // get tag names, IDs and sizes
     const auto ids = declare_parameter("tag.ids", std::vector<int64_t>{}, descr("tag ids", true));
@@ -249,9 +249,10 @@ void AprilTagNode::onImage(const sensor_msgs::msg::Image::ConstSharedPtr& msg_im
         // 3D orientation and position
         geometry_msgs::msg::TransformStamped tf;
         tf.header = msg_img->header;
-        // set child frame name by generic tag name or configured tag name
-        tf.child_frame_id = tag_frames.count(det->id) ? tag_frames.at(det->id) : std::string(det->family->name) + ":" + std::to_string(det->id);
-        const double size = tag_sizes.count(det->id) ? tag_sizes.at(det->id) : tag_edge_size;
+        // set child frame name by generic tag name or configured tag name, prefixed with node name
+        std::string base_frame_name = tag_frames.count(det->id) ? tag_frames.at(det->id) : std::string(det->family->name) + ":" + std::to_string(det->id);
+        tf.child_frame_id = std::string(this->get_name()) + "/" + base_frame_name;
+        const double size = tag_sizes.count(det->id) ? tag_sizes.at(det->id) : tag_edge_size.load();
         if(estimate_pose != nullptr) {
             tf.transform = estimate_pose(det, intrinsics, size);
         }
@@ -286,6 +287,7 @@ AprilTagNode::onParameter(const std::vector<rclcpp::Parameter>& parameters)
         IF("max_hamming", max_hamming)
         IF("profile", profile)
         IF("publish_tf", publish_tf)
+        IF("size", tag_edge_size)
     }
 
     mutex.unlock();
