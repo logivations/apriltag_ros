@@ -250,7 +250,7 @@ void AprilTagNode::onImage(const sensor_msgs::msg::Image::ConstSharedPtr& msg_im
         geometry_msgs::msg::TransformStamped tf;
         tf.header = msg_img->header;
         // set child frame name by generic tag name or configured tag name, prefixed with node name
-        std::string base_frame_name = tag_frames.count(det->id) ? tag_frames.at(det->id) : std::string(det->family->name) + ":" + std::to_string(det->id);
+        std::string base_frame_name = std::to_string(det->id);
         tf.child_frame_id = std::string(this->get_name()) + "/" + base_frame_name;
         const double size = tag_sizes.count(det->id) ? tag_sizes.at(det->id) : tag_edge_size.load();
         if(estimate_pose != nullptr) {
