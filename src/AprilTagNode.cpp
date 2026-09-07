@@ -74,6 +74,7 @@ private:
     std::mutex mutex;
     std::atomic<double> tag_edge_size;
     std::atomic<int> max_hamming;
+    std::atomic<int> clip_max;
     std::atomic<bool> profile;
     std::atomic<bool> publish_tf;
     std::unordered_map<int, std::string> tag_frames;
@@ -144,6 +145,11 @@ AprilTagNode::AprilTagNode(const rclcpp::NodeOptions& options)
     declare_parameter("detector.refine", td->refine_edges, descr("snap to strong gradients"));
     declare_parameter("detector.sharpening", td->decode_sharpening, descr("sharpening of decoded images"));
     declare_parameter("detector.debug", td->debug, descr("write additional debugging images to working directory"));
+    // Saturated regions (ceiling lights, windows) next to a tag push the detector's
+    // local min/max threshold above the tag's white cells and the quad is lost.
+    // Clamping intensities before detection keeps the threshold near the tag's own
+    // black/white levels. 0 disables clamping.
+    declare_parameter("detector.clip_max", 0, descr("clamp pixel intensities above this value (1-254) before detection, 0 = off"));
 
     declare_parameter("max_hamming", 0, descr("reject detections with more corrected bits than allowed"));
     declare_parameter("profile", false, descr("print profiling information to stdout"));
@@ -199,7 +205,19 @@ void AprilTagNode::onImage(const sensor_msgs::msg::Image::ConstSharedPtr& msg_im
     const std::array<double, 4> intrinsics = {ci.p.data()[0], ci.p.data()[5], ci.p.data()[2], ci.p.data()[6]};
 
     // convert to 8bit monochrome image
-    const cv::Mat img_uint8 = cv_bridge::toCvShare(msg_img, "mono8")->image;
+    cv::Mat img_uint8 = cv_bridge::toCvShare(msg_img, "mono8")->image;
+
+    // optionally clamp saturated pixels (see detector.clip_max); toCvShare may alias the
+    // message buffer, so write into a fresh (continuous) matrix
+    const int clip = clip_max;
+    if(clip > 0 && clip < 255) {
+        cv::Mat clipped;
+        cv::min(img_uint8, clip, clipped);
+        img_uint8 = clipped;
+    }
+    if(!img_uint8.isContinuous()) {
+        img_uint8 = img_uint8.clone();
+    }
 
     image_u8_t im{img_uint8.cols, img_uint8.rows, img_uint8.cols, img_uint8.data};
 
@@ -284,6 +302,7 @@ AprilTagNode::onParameter(const std::vector<rclcpp::Parameter>& parameters)
         IF("detector.refine", td->refine_edges)
         IF("detector.sharpening", td->decode_sharpening)
         IF("detector.debug", td->debug)
+        IF("detector.clip_max", clip_max)
         IF("max_hamming", max_hamming)
         IF("profile", profile)
         IF("publish_tf", publish_tf)

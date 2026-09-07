@@ -42,6 +42,8 @@ apriltag:                 # node name
       blur: 0.0           # sigma of Gaussian blur for quad detection
       refine: 1           # snap to strong gradients
       sharpening: 0.25    # sharpening of decoded images
+      clip_max: 0         # clamp pixel intensities above this value (1-254) before detection, 0 = off;
+                          # rescues tags in front of saturated backgrounds (lights, windows)
       debug: 0            # write additional debugging images to current working directory
 
     # (optional) list of tags
