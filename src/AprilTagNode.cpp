@@ -74,6 +74,7 @@ private:
     std::mutex mutex;
     std::atomic<double> tag_edge_size;
     std::atomic<int> max_hamming;
+    std::atomic<int> min_border_distance;
     std::atomic<int> clip_max;
     std::atomic<bool> profile;
     std::atomic<bool> publish_tf;
@@ -152,6 +153,9 @@ AprilTagNode::AprilTagNode(const rclcpp::NodeOptions& options)
     declare_parameter("detector.clip_max", 0, descr("clamp pixel intensities above this value (1-254) before detection, 0 = off"));
 
     declare_parameter("max_hamming", 0, descr("reject detections with more corrected bits than allowed"));
+    // A tag cut by the image edge can still decode (the data bits are inside), but its
+    // quad corners snap to the edge, so the estimated pose is tilted by a few degrees.
+    declare_parameter("min_border_distance", 0, descr("reject detections with a corner closer than this many pixels to the image edge, 0 = off"));
     declare_parameter("profile", false, descr("print profiling information to stdout"));
     declare_parameter("publish_tf", false, descr("estimate pose and publish tf"));
 
@@ -249,6 +253,24 @@ void AprilTagNode::onImage(const sensor_msgs::msg::Image::ConstSharedPtr& msg_im
         // reject detections with more corrected bits than allowed
         if(det->hamming > max_hamming) { continue; }
 
+        // reject tags touching the image edge (see min_border_distance)
+        const int border = min_border_distance;
+        if(border > 0) {
+            bool at_border = false;
+            for(int c = 0; c < 4; c++) {
+                const double x = det->p[c][0];
+                const double y = det->p[c][1];
+                if(x < border || y < border || x > im.width - 1 - border || y > im.height - 1 - border) {
+                    at_border = true;
+                    break;
+                }
+            }
+            if(at_border) {
+                RCLCPP_DEBUG(get_logger(), "rejecting tag %d: a corner is within %d px of the image edge", det->id, border);
+                continue;
+            }
+        }
+
         // detection
         apriltag_msgs::msg::AprilTagDetection msg_detection;
         msg_detection.family = std::string(det->family->name);
@@ -304,6 +326,7 @@ AprilTagNode::onParameter(const std::vector<rclcpp::Parameter>& parameters)
         IF("detector.debug", td->debug)
         IF("detector.clip_max", clip_max)
         IF("max_hamming", max_hamming)
+        IF("min_border_distance", min_border_distance)
         IF("profile", profile)
         IF("publish_tf", publish_tf)
         IF("size", tag_edge_size)
