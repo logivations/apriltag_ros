@@ -149,6 +149,15 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+  find_package(class_loader REQUIRED)
+  ament_add_gtest(test_clip_max test/test_clip_max.cpp SKIP_LINKING_MAIN_LIBRARIES TIMEOUT 60)
+  target_link_libraries(test_clip_max apriltag::apriltag)
+  ament_target_dependencies(test_clip_max rclcpp rclcpp_components class_loader sensor_msgs apriltag_msgs std_srvs)
+  # the test loads the node like a component container does
+  target_compile_definitions(test_clip_max PRIVATE APRILTAG_NODE_LIBRARY="$<TARGET_FILE:AprilTagNode>")
+  add_dependencies(test_clip_max AprilTagNode)
 endif()
 
 ament_package()
