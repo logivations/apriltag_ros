@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -38,9 +39,10 @@ static void draw_tag(std::vector<uint8_t>& img, apriltag_family_t* family, int i
     image_u8_destroy(tag);
 }
 
-TEST(ClipMax, FindsTagWhoseBlackCellsAreAboveTheClampValueOnce)
+// ids the node publishes for one frame with a normal-contrast tag 152 and a sunlit tag 151,
+// clip_max 140; detector.clip_also_unclamped is set only when `also_unclamped` is given
+static std::vector<int> detected_ids(const std::string& ns, const bool* also_unclamped)
 {
-    // 152 has normal contrast and is found in both images, 151 is in sunlight
     std::vector<uint8_t> pixels(kWidth * kHeight, 120);
     apriltag_family_t* family = tag36h11_create();
     draw_tag(pixels, family, 152, 100, 160, 16, 30, 230);
@@ -50,11 +52,15 @@ TEST(ClipMax, FindsTagWhoseBlackCellsAreAboveTheClampValueOnce)
     class_loader::ClassLoader loader(APRILTAG_NODE_LIBRARY);
     auto factory = loader.createInstance<rclcpp_components::NodeFactory>("rclcpp_components::NodeFactoryTemplate<AprilTagNode>");
     rclcpp::NodeOptions options;
-    options.arguments({"--ros-args", "-r", "__ns:=/clip_max_test"});
-    options.parameter_overrides({{"detector.clip_max", 140}});
+    options.arguments({"--ros-args", "-r", "__ns:=" + ns});
+    std::vector<rclcpp::Parameter> params{{"detector.clip_max", 140}};
+    if(also_unclamped) {
+        params.emplace_back("detector.clip_also_unclamped", *also_unclamped);
+    }
+    options.parameter_overrides(params);
     auto apriltag = factory->create_node_instance(options);
 
-    auto tester = std::make_shared<rclcpp::Node>("tester", "/clip_max_test");
+    auto tester = std::make_shared<rclcpp::Node>("tester", ns);
     auto pub_image = tester->create_publisher<sensor_msgs::msg::Image>("image_rect", 1);
     auto pub_info = tester->create_publisher<sensor_msgs::msg::CameraInfo>("camera_info", 1);
     std::vector<apriltag_msgs::msg::AprilTagDetectionArray> received;
@@ -66,11 +72,17 @@ TEST(ClipMax, FindsTagWhoseBlackCellsAreAboveTheClampValueOnce)
     executor.add_node(apriltag.get_node_base_interface());
     executor.add_node(tester);
 
-    ASSERT_TRUE(enable->wait_for_service(5s));
+    if(!enable->wait_for_service(5s)) {
+        ADD_FAILURE() << "toggle_enabled not available";
+        return {};
+    }
     auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
     request->data = true;
     auto response = enable->async_send_request(request);
-    ASSERT_EQ(executor.spin_until_future_complete(response, 5s), rclcpp::FutureReturnCode::SUCCESS);
+    if(executor.spin_until_future_complete(response, 5s) != rclcpp::FutureReturnCode::SUCCESS) {
+        ADD_FAILURE() << "toggle_enabled did not answer";
+        return {};
+    }
 
     sensor_msgs::msg::CameraInfo info;
     info.width = kWidth;
@@ -95,14 +107,28 @@ TEST(ClipMax, FindsTagWhoseBlackCellsAreAboveTheClampValueOnce)
             std::this_thread::sleep_for(10ms);
         }
     }
-    ASSERT_FALSE(received.empty()) << "no detections published";
+    if(received.empty()) {
+        ADD_FAILURE() << "no detections published";
+        return {};
+    }
 
     std::vector<int> ids;
     for(const auto& detection : received.front().detections) {
         ids.push_back(detection.id);
     }
     std::sort(ids.begin(), ids.end());
-    EXPECT_EQ(ids, (std::vector<int>{151, 152}));
+    return ids;
+}
+
+TEST(ClipMax, AlsoUnclampedFindsTheSunlitTagOnce)
+{
+    const bool on = true;
+    EXPECT_EQ(detected_ids("/clip_max_test_on", &on), (std::vector<int>{151, 152}));
+}
+
+TEST(ClipMax, ClampedImageOnlyByDefault)
+{
+    EXPECT_EQ(detected_ids("/clip_max_test_default", nullptr), (std::vector<int>{152}));
 }
 
 int main(int argc, char** argv)

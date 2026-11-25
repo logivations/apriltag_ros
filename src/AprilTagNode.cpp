@@ -78,6 +78,7 @@ private:
     std::atomic<int> max_hamming;
     std::atomic<int> min_border_distance;
     std::atomic<int> clip_max;
+    std::atomic<bool> clip_also_unclamped;
     std::atomic<bool> profile;
     std::atomic<bool> publish_tf;
     std::unordered_map<int, std::string> tag_frames;
@@ -151,10 +152,12 @@ AprilTagNode::AprilTagNode(const rclcpp::NodeOptions& options)
     // Saturated regions (ceiling lights, windows) next to a tag push the detector's
     // local min/max threshold above the tag's white cells and the quad is lost.
     // Clamping intensities before detection keeps the threshold near the tag's own
-    // black/white levels. A tag in direct sunlight can have its black cells above the
-    // clamp value, so clamping makes it uniformly grey; the original image is therefore
-    // searched as well, for the ids the clamped one missed. 0 disables clamping.
-    declare_parameter("detector.clip_max", 0, descr("also search a copy with pixel intensities clamped to this value (1-254), 0 = off"));
+    // black/white levels. 0 disables clamping.
+    declare_parameter("detector.clip_max", 0, descr("clamp pixel intensities above this value (1-254) before detection, 0 = off"));
+    // A tag in direct sunlight can have its black cells above the clamp value, so the
+    // clamped copy is uniformly grey there. With this on, the original image is searched
+    // as well, for the ids the clamped copy missed (about twice the detection time).
+    declare_parameter("detector.clip_also_unclamped", false, descr("with clip_max, also search the unclamped image for the tags the clamped one missed"));
 
     declare_parameter("max_hamming", 0, descr("reject detections with more corrected bits than allowed"));
     // A tag cut by the image edge can still decode (the data bits are inside), but its
@@ -214,21 +217,22 @@ void AprilTagNode::onImage(const sensor_msgs::msg::Image::ConstSharedPtr& msg_im
 
     // convert to 8bit monochrome image
     cv::Mat img_uint8 = cv_bridge::toCvShare(msg_img, "mono8")->image;
-    if(!img_uint8.isContinuous()) {
-        img_uint8 = img_uint8.clone();
-    }
 
-    // With detector.clip_max, search the clamped copy first and then the original image.
-    // A tag found in both keeps its detection from the clamped copy. toCvShare may alias
-    // the message buffer, so the clamped copy is written into a fresh (continuous) matrix.
+    // With detector.clip_max, search the clamped copy first, and with
+    // detector.clip_also_unclamped then the original image. A tag found in both keeps its
+    // detection from the clamped copy. toCvShare may alias the message buffer, so the
+    // clamped copy is written into a fresh (continuous) matrix.
     std::vector<cv::Mat> images;
     const int clip = clip_max;
-    if(clip > 0 && clip < 255) {
+    const bool clamp = clip > 0 && clip < 255;
+    if(clamp) {
         cv::Mat clipped;
         cv::min(img_uint8, clip, clipped);
         images.push_back(clipped);
     }
-    images.push_back(img_uint8);
+    if(!clamp || clip_also_unclamped) {
+        images.push_back(img_uint8.isContinuous() ? img_uint8 : img_uint8.clone());
+    }
 
     apriltag_msgs::msg::AprilTagDetectionArray msg_detections;
     msg_detections.header = msg_img->header;
@@ -345,6 +349,7 @@ AprilTagNode::onParameter(const std::vector<rclcpp::Parameter>& parameters)
         IF("detector.sharpening", td->decode_sharpening)
         IF("detector.debug", td->debug)
         IF("detector.clip_max", clip_max)
+        IF("detector.clip_also_unclamped", clip_also_unclamped)
         IF("max_hamming", max_hamming)
         IF("min_border_distance", min_border_distance)
         IF("profile", profile)
