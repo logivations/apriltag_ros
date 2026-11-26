@@ -40,8 +40,8 @@ static void draw_tag(std::vector<uint8_t>& img, apriltag_family_t* family, int i
 }
 
 // ids the node publishes for one frame with a normal-contrast tag 152 and a sunlit tag 151,
-// clip_max 140; detector.clip_also_unclamped is set only when `also_unclamped` is given
-static std::vector<int> detected_ids(const std::string& ns, const bool* also_unclamped)
+// clip_max 140 plus `extra` parameters
+static std::vector<int> detected_ids(const std::string& ns, const std::vector<rclcpp::Parameter>& extra)
 {
     std::vector<uint8_t> pixels(kWidth * kHeight, 120);
     apriltag_family_t* family = tag36h11_create();
@@ -54,9 +54,7 @@ static std::vector<int> detected_ids(const std::string& ns, const bool* also_unc
     rclcpp::NodeOptions options;
     options.arguments({"--ros-args", "-r", "__ns:=" + ns});
     std::vector<rclcpp::Parameter> params{{"detector.clip_max", 140}};
-    if(also_unclamped) {
-        params.emplace_back("detector.clip_also_unclamped", *also_unclamped);
-    }
+    params.insert(params.end(), extra.begin(), extra.end());
     options.parameter_overrides(params);
     auto apriltag = factory->create_node_instance(options);
 
@@ -120,15 +118,25 @@ static std::vector<int> detected_ids(const std::string& ns, const bool* also_unc
     return ids;
 }
 
-TEST(ClipMax, AlsoUnclampedFindsTheSunlitTagOnce)
-{
-    const bool on = true;
-    EXPECT_EQ(detected_ids("/clip_max_test_on", &on), (std::vector<int>{151, 152}));
-}
-
 TEST(ClipMax, ClampedImageOnlyByDefault)
 {
-    EXPECT_EQ(detected_ids("/clip_max_test_default", nullptr), (std::vector<int>{152}));
+    EXPECT_EQ(detected_ids("/clip_max_test_default", {}), (std::vector<int>{152}));
+}
+
+TEST(ClipMax, AlsoUnclampedFindsTheMissingExpectedTagOnce)
+{
+    const std::vector<rclcpp::Parameter> extra{
+        {"detector.clip_also_unclamped", true},
+        {"expected_ids", std::vector<int64_t>{151, 152}}};
+    EXPECT_EQ(detected_ids("/clip_max_test_missing", extra), (std::vector<int>{151, 152}));
+}
+
+TEST(ClipMax, NoUnclampedSearchOnceTheExpectedTagsAreFound)
+{
+    const std::vector<rclcpp::Parameter> extra{
+        {"detector.clip_also_unclamped", true},
+        {"expected_ids", std::vector<int64_t>{152}}};
+    EXPECT_EQ(detected_ids("/clip_max_test_found", extra), (std::vector<int>{152}));
 }
 
 int main(int argc, char** argv)

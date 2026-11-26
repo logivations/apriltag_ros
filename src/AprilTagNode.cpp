@@ -1,5 +1,6 @@
 // ros
 #include "pose_estimation.hpp"
+#include <algorithm>
 #include <optional>
 #include <unordered_set>
 #include <vector>
@@ -79,6 +80,8 @@ private:
     std::atomic<int> min_border_distance;
     std::atomic<int> clip_max;
     std::atomic<bool> clip_also_unclamped;
+    // guarded by mutex
+    std::vector<int64_t> expected_ids;
     std::atomic<bool> profile;
     std::atomic<bool> publish_tf;
     std::unordered_map<int, std::string> tag_frames;
@@ -158,6 +161,9 @@ AprilTagNode::AprilTagNode(const rclcpp::NodeOptions& options)
     // clamped copy is uniformly grey there. With this on, the original image is searched
     // as well, for the ids the clamped copy missed (about twice the detection time).
     declare_parameter("detector.clip_also_unclamped", false, descr("with clip_max, also search the unclamped image for the tags the clamped one missed"));
+    // The caller (e.g. a platform pick) knows which tags it needs: once the clamped copy
+    // has all of them, the unclamped image is not searched.
+    declare_parameter("expected_ids", std::vector<int64_t>{}, descr("ids the caller needs: with detector.clip_also_unclamped, search the unclamped image only while one is missing; empty = always"));
 
     declare_parameter("max_hamming", 0, descr("reject detections with more corrected bits than allowed"));
     // A tag cut by the image edge can still decode (the data bits are inside), but its
@@ -242,7 +248,17 @@ void AprilTagNode::onImage(const sensor_msgs::msg::Image::ConstSharedPtr& msg_im
     // ids accepted from an earlier image
     std::unordered_set<int> ids_found;
 
-    for(const cv::Mat& img : images) {
+    mutex.lock();
+    const std::vector<int64_t> expected = expected_ids;
+    mutex.unlock();
+
+    for(size_t i_img = 0; i_img < images.size(); i_img++) {
+        // the unclamped image only while an expected id is still missing
+        if(i_img > 0 && !expected.empty() &&
+           std::all_of(expected.begin(), expected.end(), [&ids_found](int64_t id) { return ids_found.count(static_cast<int>(id)) > 0; })) {
+            break;
+        }
+        const cv::Mat& img = images[i_img];
         image_u8_t im{img.cols, img.rows, img.cols, img.data};
 
         // detect tags
@@ -350,6 +366,7 @@ AprilTagNode::onParameter(const std::vector<rclcpp::Parameter>& parameters)
         IF("detector.debug", td->debug)
         IF("detector.clip_max", clip_max)
         IF("detector.clip_also_unclamped", clip_also_unclamped)
+        IF("expected_ids", expected_ids)
         IF("max_hamming", max_hamming)
         IF("min_border_distance", min_border_distance)
         IF("profile", profile)
