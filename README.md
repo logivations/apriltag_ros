@@ -38,6 +38,8 @@ apriltag:                 # node name
     max_hamming: 0        # maximum allowed hamming distance (corrected bits)
     min_border_distance: 0  # reject tags with a corner closer than this many pixels to the image edge, 0 = off;
                             # a tag cut by the edge still decodes but gives a tilted pose
+    expected_ids: []      # ids the caller needs; with detector.clip_also_unclamped the unclamped image is
+                          # searched only while one of them is missing, empty = on every image
     detector:
       threads: 1          # number of threads
       decimate: 2.0       # decimate resolution for quad detection
@@ -46,6 +48,8 @@ apriltag:                 # node name
       sharpening: 0.25    # sharpening of decoded images
       clip_max: 0         # clamp pixel intensities above this value (1-254) before detection, 0 = off;
                           # rescues tags in front of saturated backgrounds (lights, windows)
+      clip_also_unclamped: false  # with clip_max, also search the unclamped image for the tags the clamped
+                                  # one missed, e.g. tags in sunlight whose black cells are above clip_max
       debug: 0            # write additional debugging images to current working directory
 
     # (optional) list of tags

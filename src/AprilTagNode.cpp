@@ -1,6 +1,9 @@
 // ros
 #include "pose_estimation.hpp"
+#include <algorithm>
 #include <optional>
+#include <unordered_set>
+#include <vector>
 #include <apriltag_msgs/msg/april_tag_detection.hpp>
 #include <apriltag_msgs/msg/april_tag_detection_array.hpp>
 #ifdef cv_bridge_HPP
@@ -76,6 +79,9 @@ private:
     std::atomic<int> max_hamming;
     std::atomic<int> min_border_distance;
     std::atomic<int> clip_max;
+    std::atomic<bool> clip_also_unclamped;
+    // guarded by mutex
+    std::vector<int64_t> expected_ids;
     std::atomic<bool> profile;
     std::atomic<bool> publish_tf;
     std::unordered_map<int, std::string> tag_frames;
@@ -151,6 +157,13 @@ AprilTagNode::AprilTagNode(const rclcpp::NodeOptions& options)
     // Clamping intensities before detection keeps the threshold near the tag's own
     // black/white levels. 0 disables clamping.
     declare_parameter("detector.clip_max", 0, descr("clamp pixel intensities above this value (1-254) before detection, 0 = off"));
+    // A tag in direct sunlight can have its black cells above the clamp value, so the
+    // clamped copy is uniformly grey there. With this on, the original image is searched
+    // as well, for the ids the clamped copy missed (about twice the detection time).
+    declare_parameter("detector.clip_also_unclamped", false, descr("with clip_max, also search the unclamped image for the tags the clamped one missed"));
+    // The caller (e.g. a platform pick) knows which tags it needs: once the clamped copy
+    // has all of them, the unclamped image is not searched.
+    declare_parameter("expected_ids", std::vector<int64_t>{}, descr("ids the caller needs: with detector.clip_also_unclamped, search the unclamped image only while one is missing; empty = always"));
 
     declare_parameter("max_hamming", 0, descr("reject detections with more corrected bits than allowed"));
     // A tag cut by the image edge can still decode (the data bits are inside), but its
@@ -211,101 +224,128 @@ void AprilTagNode::onImage(const sensor_msgs::msg::Image::ConstSharedPtr& msg_im
     // convert to 8bit monochrome image
     cv::Mat img_uint8 = cv_bridge::toCvShare(msg_img, "mono8")->image;
 
-    // optionally clamp saturated pixels (see detector.clip_max); toCvShare may alias the
-    // message buffer, so write into a fresh (continuous) matrix
+    // With detector.clip_max, search the clamped copy first, and with
+    // detector.clip_also_unclamped then the original image. A tag found in both keeps its
+    // detection from the clamped copy. toCvShare may alias the message buffer, so the
+    // clamped copy is written into a fresh (continuous) matrix.
+    std::vector<cv::Mat> images;
     const int clip = clip_max;
-    if(clip > 0 && clip < 255) {
+    const bool clamp = clip > 0 && clip < 255;
+    if(clamp) {
         cv::Mat clipped;
         cv::min(img_uint8, clip, clipped);
-        img_uint8 = clipped;
+        images.push_back(clipped);
     }
-    if(!img_uint8.isContinuous()) {
-        img_uint8 = img_uint8.clone();
+    if(!clamp || clip_also_unclamped) {
+        images.push_back(img_uint8.isContinuous() ? img_uint8 : img_uint8.clone());
     }
-
-    image_u8_t im{img_uint8.cols, img_uint8.rows, img_uint8.cols, img_uint8.data};
-
-    // detect tags
-    mutex.lock();
-    zarray_t* detections = apriltag_detector_detect(td, &im);
-    mutex.unlock();
-
-    if(profile)
-        timeprofile_display(td->tp);
 
     apriltag_msgs::msg::AprilTagDetectionArray msg_detections;
     msg_detections.header = msg_img->header;
 
     std::vector<geometry_msgs::msg::TransformStamped> tfs;
 
-    for(int i = 0; i < zarray_size(detections); i++) {
-        apriltag_detection_t* det;
-        zarray_get(detections, i, &det);
+    // ids accepted from an earlier image
+    std::unordered_set<int> ids_found;
 
-        RCLCPP_DEBUG(get_logger(),
-                     "detection %3d: id (%2dx%2d)-%-4d, hamming %d, margin %8.3f\n",
-                     i, det->family->nbits, det->family->h, det->id,
-                     det->hamming, det->decision_margin);
+    mutex.lock();
+    const std::vector<int64_t> expected = expected_ids;
+    mutex.unlock();
 
-        // ignore untracked tags
-        if(!tag_frames.empty() && !tag_frames.count(det->id)) { continue; }
+    for(size_t i_img = 0; i_img < images.size(); i_img++) {
+        // the unclamped image only while an expected id is still missing
+        if(i_img > 0 && !expected.empty() &&
+           std::all_of(expected.begin(), expected.end(), [&ids_found](int64_t id) { return ids_found.count(static_cast<int>(id)) > 0; })) {
+            break;
+        }
+        const cv::Mat& img = images[i_img];
+        image_u8_t im{img.cols, img.rows, img.cols, img.data};
 
-        // reject detections with more corrected bits than allowed
-        if(det->hamming > max_hamming) { continue; }
+        // detect tags
+        mutex.lock();
+        zarray_t* detections = apriltag_detector_detect(td, &im);
+        mutex.unlock();
 
-        // reject tags touching the image edge (see min_border_distance)
-        const int border = min_border_distance;
-        if(border > 0) {
-            bool at_border = false;
-            for(int c = 0; c < 4; c++) {
-                const double x = det->p[c][0];
-                const double y = det->p[c][1];
-                if(x < border || y < border || x > im.width - 1 - border || y > im.height - 1 - border) {
-                    at_border = true;
-                    break;
+        if(profile)
+            timeprofile_display(td->tp);
+
+        std::unordered_set<int> ids_found_here;
+
+        for(int i = 0; i < zarray_size(detections); i++) {
+            apriltag_detection_t* det;
+            zarray_get(detections, i, &det);
+
+            RCLCPP_DEBUG(get_logger(),
+                         "detection %3d: id (%2dx%2d)-%-4d, hamming %d, margin %8.3f\n",
+                         i, det->family->nbits, det->family->h, det->id,
+                         det->hamming, det->decision_margin);
+
+            // ignore untracked tags
+            if(!tag_frames.empty() && !tag_frames.count(det->id)) { continue; }
+
+            // already found in the clamped copy
+            if(ids_found.count(det->id)) { continue; }
+
+            // reject detections with more corrected bits than allowed
+            if(det->hamming > max_hamming) { continue; }
+
+            // reject tags touching the image edge (see min_border_distance)
+            const int border = min_border_distance;
+            if(border > 0) {
+                bool at_border = false;
+                for(int c = 0; c < 4; c++) {
+                    const double x = det->p[c][0];
+                    const double y = det->p[c][1];
+                    if(x < border || y < border || x > im.width - 1 - border || y > im.height - 1 - border) {
+                        at_border = true;
+                        break;
+                    }
+                }
+                if(at_border) {
+                    RCLCPP_DEBUG(get_logger(), "rejecting tag %d: a corner is within %d px of the image edge", det->id, border);
+                    continue;
                 }
             }
-            if(at_border) {
-                RCLCPP_DEBUG(get_logger(), "rejecting tag %d: a corner is within %d px of the image edge", det->id, border);
+
+            ids_found_here.insert(det->id);
+
+            // detection
+            apriltag_msgs::msg::AprilTagDetection msg_detection;
+            msg_detection.family = std::string(det->family->name);
+            msg_detection.id = det->id;
+            msg_detection.hamming = det->hamming;
+            msg_detection.decision_margin = det->decision_margin;
+            msg_detection.centre.x = det->c[0];
+            msg_detection.centre.y = det->c[1];
+            std::memcpy(msg_detection.corners.data(), det->p, sizeof(double) * 8);
+            std::memcpy(msg_detection.homography.data(), det->H->data, sizeof(double) * 9);
+            msg_detections.detections.push_back(msg_detection);
+
+            if(!publish_tf){
                 continue;
             }
+            // 3D orientation and position
+            geometry_msgs::msg::TransformStamped tf;
+            tf.header = msg_img->header;
+            // set child frame name by generic tag name or configured tag name, prefixed with node name
+            std::string base_frame_name = std::to_string(det->id);
+            tf.child_frame_id = std::string(this->get_name()) + "/" + base_frame_name;
+            const double size = tag_sizes.count(det->id) ? tag_sizes.at(det->id) : tag_edge_size.load();
+            if(estimate_pose != nullptr) {
+                tf.transform = estimate_pose(det, intrinsics, size);
+            }
+
+            tfs.push_back(tf);
         }
 
-        // detection
-        apriltag_msgs::msg::AprilTagDetection msg_detection;
-        msg_detection.family = std::string(det->family->name);
-        msg_detection.id = det->id;
-        msg_detection.hamming = det->hamming;
-        msg_detection.decision_margin = det->decision_margin;
-        msg_detection.centre.x = det->c[0];
-        msg_detection.centre.y = det->c[1];
-        std::memcpy(msg_detection.corners.data(), det->p, sizeof(double) * 8);
-        std::memcpy(msg_detection.homography.data(), det->H->data, sizeof(double) * 9);
-        msg_detections.detections.push_back(msg_detection);
-
-        if(!publish_tf){
-            continue;
-        }
-        // 3D orientation and position
-        geometry_msgs::msg::TransformStamped tf;
-        tf.header = msg_img->header;
-        // set child frame name by generic tag name or configured tag name, prefixed with node name
-        std::string base_frame_name = std::to_string(det->id);
-        tf.child_frame_id = std::string(this->get_name()) + "/" + base_frame_name;
-        const double size = tag_sizes.count(det->id) ? tag_sizes.at(det->id) : tag_edge_size.load();
-        if(estimate_pose != nullptr) {
-            tf.transform = estimate_pose(det, intrinsics, size);
-        }
-
-        tfs.push_back(tf);
+        apriltag_detections_destroy(detections);
+        ids_found.insert(ids_found_here.begin(), ids_found_here.end());
     }
 
     pub_detections->publish(msg_detections);
     if(publish_tf){
         tf_broadcaster.sendTransform(tfs);
     }
-
-    apriltag_detections_destroy(detections);
 }
 
 rcl_interfaces::msg::SetParametersResult
@@ -325,6 +365,8 @@ AprilTagNode::onParameter(const std::vector<rclcpp::Parameter>& parameters)
         IF("detector.sharpening", td->decode_sharpening)
         IF("detector.debug", td->debug)
         IF("detector.clip_max", clip_max)
+        IF("detector.clip_also_unclamped", clip_also_unclamped)
+        IF("expected_ids", expected_ids)
         IF("max_hamming", max_hamming)
         IF("min_border_distance", min_border_distance)
         IF("profile", profile)
